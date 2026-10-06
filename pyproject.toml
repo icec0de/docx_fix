@@ -1,0 +1,8 @@
+[project]
+name = "docx-fix"
+version = "0.1.0"
+description = "Check and fix a .docx for digital distribution: page setup, table/list pagination, lead-ins, text and document sanitization, TOC refresh."
+requires-python = ">=3.12"
+dependencies = [
+    "lxml>=6.0",
+]
