@@ -357,5 +357,6 @@ referenced style/numId resolves).
 - Python ≥ 3.12, uv (`uv sync`, `uv run`), single dependency `lxml`. No inline script metadata.
 - `docx_fix.py` is the only entry point; it reads one `.docx` and writes next to it (or to the
   given path) through `<out>.part` + `os.replace`.
+- `README.md` is the user-facing summary; `spec.md` stays authoritative.
 - Gitignored: `.venv/`, `__pycache__/`, `.claude/`, `.DS_Store`, Word lock files `~$*`, `*.part`,
   and generated `*_fixed.docx` / `*.report.md`.
