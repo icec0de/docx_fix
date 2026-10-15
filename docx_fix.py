@@ -19,6 +19,8 @@ Options:
     --leadin ID            accept a reviewed '.'-ending lead-in (ID from the report) and convert
                            its final '.' to ':' (repeatable)
     --strip-rsid           also strip rsid editing fingerprints, set removePersonalInformation
+    --only N[,N...]        run only the rules with these spec numbers (e.g. --only 8.1,8.2 accepts
+                           tracked changes and removes comments, leaving layout and text alone)
 
 See spec.md.
 """
@@ -30,7 +32,7 @@ import posixpath
 import re
 import sys
 import zipfile
-from collections import defaultdict
+from collections import Counter, defaultdict
 from urllib.parse import unquote
 
 from lxml import etree
@@ -1103,13 +1105,27 @@ def rule_blank_lines(d):
                 if b is not None and b.tag == P and is_empty(b):
                     run.append(b)
                     continue
-                if len(run) >= 2:
+                if len(run) >= 2 and len([p for p in run if protected(p)] or run[:1]) < len(run):
                     keep = [p for p in run if protected(p)] or run[:1]
                     for p in run:
                         if p not in keep:
                             remove(p)
                             n += 1
+                    after = snippet(Text(b).text, 60) if b is not None and b.tag == P else \
+                        'table' if b is not None else 'end of ' + local(cont)
+                    d.log['Runs of empty paragraphs collapsed'].append(f'{len(run)} → {len(keep)}, before: {after}')
                 run = []
+        # empty lines made with line breaks: repeated, leading or trailing breaks inside a paragraph
+        for p in root.iter(P):
+            toks = [el for el in tokens(p) if not (el.tag == T and not (el.text or '').strip())]
+            for i, el in enumerate(toks):
+                if el.tag != q('w:br') or wv(el, 'type') not in (None, 'textWrapping'):
+                    continue
+                prev_br = i > 0 and toks[i - 1].tag == q('w:br') and wv(toks[i - 1], 'type') in (None, 'textWrapping')
+                if i == 0 or i == len(toks) - 1 or prev_br:
+                    remove(el)
+                    d.log['Empty lines made with line breaks removed'].append(snippet(Text(p).text, 60))
+                    n += 1
     return n
 
 
@@ -1123,6 +1139,656 @@ def rule_empty_headings(d):
             d.findings['Empty headings (not removed)'].append(
                 f'H{lvl} style {p_style(p, st)}' + (f', bookmarks: {", ".join(marks)}' if marks else ''))
     return 0
+
+
+# ---------------------------------------------------------------------------------------------
+# §11 Styles: every paragraph's look comes from its style, not from per-editor direct formatting.
+# One-way sub-order (all within one pass): assign styles (11.1–11.3) -> promote the dominant direct
+# formatting into each style (11.4) -> strip direct formatting (11.5) -> house style (11.6, 11.7).
+
+RPR_ORDER = ('rStyle rFonts b bCs i iCs caps smallCaps strike dstrike outline shadow emboss imprint '
+             'noProof snapToGrid vanish webHidden color spacing w kern position sz szCs highlight u '
+             'effect bdr shd fitText vertAlign rtl cs em lang eastAsianLayout specVanish oMath').split()
+TCPR_ORDER = ('cnfStyle tcW gridSpan hMerge vMerge tcBorders shd noWrap tcMar textDirection tcFitText '
+              'vAlign hideMark headers cellIns cellDel cellMerge tcPrChange').split()
+STYLE_ORDER = ('name aliases basedOn next link autoRedefine hidden uiPriority semiHidden unhideWhenUsed '
+               'qFormat locked personal personalCompose personalReply rsid pPr rPr tblPr trPr tcPr '
+               'tblStylePr').split()
+ORDERS.update({'rPr': RPR_ORDER, 'tcPr': TCPR_ORDER, 'style': STYLE_ORDER})
+
+# House style (§11.6, §11.7).
+BODY_JC = 'both'
+BODY_SPACING = {'before': '120', 'after': '120'}       # 6 pt before and after
+CELL_MARGIN = '144'                                      # 0.1" on every side
+KEEP_FONTS = re.compile(r'^(Symbol|Wingdings.*|Webdings|Cambria Math|Consolas|Courier New|Menlo|'
+                        r'Source Code Pro|JetBrains Mono)$')
+# Direct run properties that only carry an editor's look: stripped wherever they appear.
+COSMETIC_R = {'rFonts', 'sz', 'szCs', 'color', 'highlight', 'kern', 'w', 'spacing', 'noProof', 'lang'}
+# Direct run properties with meaning (emphasis, sub/superscript): kept unless the style already says so.
+SEMANTIC_R = {'b', 'bCs', 'i', 'iCs', 'u', 'strike', 'dstrike', 'caps', 'smallCaps', 'vertAlign'}
+# Direct paragraph properties that only carry an editor's look.
+COSMETIC_P = {'spacing', 'ind', 'jc', 'contextualSpacing', 'suppressAutoHyphens'}
+# Pagination flags: meaningful, but redundant where the style already says the same.
+FLOW_P = {'keepNext', 'keepLines', 'pageBreakBefore', 'widowControl'}
+
+
+def rvalue(el):
+    """Comparable value of an rPr/pPr child."""
+    name = local(el)
+    if name == 'rFonts':
+        return el.get(q('w:ascii')) or ('theme:' + el.get(q('w:asciiTheme'))
+                                        if el.get(q('w:asciiTheme')) else None)
+    if name in SEMANTIC_R and name not in ('u', 'vertAlign'):
+        return is_on(el)
+    if name == 'color':
+        return (el.get(q('w:val')) or '').upper()
+    return tuple(sorted(attrs(el).items()))
+
+
+def style_prop(st, sid, where, name):
+    """The element `name` under w:pPr / w:rPr resolved along the basedOn chain (None if unset)."""
+    for s in st.chain(sid):
+        el = s.find(f'w:{where}/w:{name}', NS)
+        if el is not None:
+            return el
+    return None
+
+
+def style_el(st, sid, where):
+    s = st.by_id[sid]
+    el = s.find(q('w:' + where))
+    if el is None:
+        el = insert_ordered(s, mk('w:' + where), STYLE_ORDER)
+    return el
+
+
+def font_name(rfonts):
+    return rfonts.get(q('w:ascii')) or rfonts.get(q('w:hAnsi')) or ''
+
+
+def keep_font(el):
+    return bool(KEEP_FONTS.match(font_name(el)))
+
+
+def text_runs(p):
+    """(run, text) for runs directly carrying text in this paragraph (hyperlinks included)."""
+    out = []
+    for r in p.iter(R):
+        if r.getparent().tag in (q('w:del'), q('w:moveFrom')):
+            continue
+        txt = ''.join(t.text or '' for t in r.findall(T))
+        if txt.strip():
+            out.append((r, txt))
+    return out
+
+
+def body_paragraphs(d):
+    """Paragraphs directly in the body (not tables, text boxes, headers, notes)."""
+    body = d.xml(d.main).find(q('w:body'))
+    return [p for p in body.iter(P) if p.getparent() is body or
+            (p.getparent().tag == q('w:sdtContent') and p.getparent().getparent().getparent() is body)]
+
+
+def in_table(p):
+    return any(a.tag == q('w:tc') for a in p.iterancestors())
+
+
+def roles(d, st):
+    """Which styles play body text, table cell and table header roles (by amount of text)."""
+    body, cell, head = Counter(), Counter(), Counter()
+    for p in body_paragraphs(d):
+        if d.heading_level(p, st) is None and not is_list(p):
+            body[p_style(p, st)] += len(Text(p).text.strip())
+    for tbl in d.xml(d.main).iter(TBL):
+        for i, tr in enumerate(tbl.findall(TR)):
+            for p in tr.iter(P):
+                (head if i == 0 else cell)[p_style(p, st)] += len(Text(p).text.strip())
+    top = lambda c: c.most_common(1)[0][0] if c else None
+    return top(body), top(cell), top(head)
+
+
+def rule_unstyled(d):
+    """§11.1 A body paragraph left in the default style gets the body text style."""
+    st = d.styles()
+    if 'text language' not in d.stats:
+        d.stats['text language'] = text_language(d)
+    body, _, _ = roles(d, st)
+    n = 0
+    if body is None or body == st.default_p:
+        return 0
+    for p in body_paragraphs(d):
+        if wv(p.find('w:pPr/w:pStyle', NS)) is None and Text(p).text.replace('\x00', '').strip() \
+                and d.heading_level(p, st) is None and p.find('w:pPr/w:framePr', NS) is None:
+            pp = ppr(p)
+            pp.insert(0, mk('w:pStyle', {'val': body}))
+            d.log['Unstyled paragraphs given the body style'].append(snippet(Text(p).text))
+            n += 1
+    return n
+
+
+NUMBERED = re.compile(r'^\s*(\d+(?:\.\d+)*)\.?\s+\S')
+
+
+def rule_heading_gaps(d):
+    """§11.2 A paragraph whose number fills a gap between two same-level headings becomes one."""
+    st = d.styles()
+    ps = body_paragraphs(d)
+    heads = []
+    for i, p in enumerate(ps):
+        m = NUMBERED.match(Text(p).text)
+        lvl = d.heading_level(p, st)
+        if m and lvl:
+            heads.append((i, tuple(int(x) for x in m.group(1).split('.')), p_style(p, st)))
+    n = 0
+    for (i, a, sa), (j, b, sb) in zip(heads, heads[1:]):
+        if sa != sb or len(a) != len(b) or a[:-1] != b[:-1] or b[-1] != a[-1] + 2:
+            continue
+        want = a[:-1] + (a[-1] + 1,)
+        for p in ps[i + 1:j]:
+            text = Text(p).text.replace('\x00', '').strip()
+            m = NUMBERED.match(text)
+            if m and tuple(int(x) for x in m.group(1).split('.')) == want and len(text) < 160 \
+                    and not text.endswith(('.', ':', ';')) and d.heading_level(p, st) is None:
+                pp = ppr(p)
+                old = pp.find(q('w:pStyle'))
+                if old is not None:
+                    remove(old)
+                pp.insert(0, mk('w:pStyle', {'val': sa}))
+                d.log['Numbered headings set in a body style, restored as headings'].append(snippet(text))
+                n += 1
+    return n
+
+
+CAPTION_WORDS = re.compile(r'^\s*(Рисунок|Рис\.|Таблица|Figure|Fig\.|Table)\s*\d', re.I)
+
+
+def is_italic(r, st, sid):
+    v = is_on(r.find('w:rPr/w:i', NS))
+    if v is None:
+        v = is_on(style_prop(st, sid, 'rPr', 'i'))
+    return bool(v)
+
+
+def next_block(p):
+    """The next table, picture or non-empty paragraph after p (empty paragraphs are skipped)."""
+    nxt = p.getnext()
+    while nxt is not None:
+        if nxt.tag == TBL:
+            return 'table'
+        if nxt.tag == P:
+            if nxt.find('.//w:drawing', NS) is not None or nxt.find('.//w:pict', NS) is not None:
+                return 'picture'
+            if Text(nxt).text.replace('\x00', '').strip():
+                return 'text'
+        nxt = nxt.getnext()
+    return None
+
+
+def rule_captions(d):
+    """§11.3 Captions and block titles get their own styles.
+    - a paragraph starting "Рисунок N" / "Figure N" is a caption: the caption style;
+    - a short, fully italic line without final punctuation right above a table or picture is a block
+      title: a title style derived from the caption style (left-aligned)."""
+    st = d.styles()
+    names = {sid: (wv(s.find(q('w:name'))) or '') for sid, s in st.by_id.items()}
+    use = Counter(p_style(p, st) for p in body_paragraphs(d))
+    caps = [sid for sid in use if 'caption' in names.get(sid, '').lower() and 'title' not in names.get(sid, '').lower()]
+    if not caps:
+        return 0
+    cap = max(caps, key=lambda sid: use[sid])
+    title = cap + 'Title'
+    body, _, _ = roles(d, st)
+    n = 0
+    for p in body_paragraphs(d):
+        sid = p_style(p, st)
+        text = Text(p).text.replace('\x00', '').strip()
+        if not text or d.heading_level(p, st) is not None or is_list(p) or sid not in (body, cap):
+            continue
+        if CAPTION_WORDS.match(text):
+            want, label = cap, 'Captions set in another style, given the caption style'
+        elif len(text) < 120 and not text.endswith(('.', ':', ';', '!', '?')) \
+                and next_block(p) in ('table', 'picture') \
+                and all(is_italic(r, st, sid) for r, _ in text_runs(p)):
+            want, label = title, 'Block titles above tables and pictures, given the title style'
+        else:
+            continue
+        if sid == want:
+            continue
+        if want == title and title not in st.by_id:
+            s = mk('w:style', {'type': 'paragraph', 'customStyle': '1', 'styleId': title})
+            s.append(mk('w:name', {'val': names[cap] + ' — Title'}))
+            s.append(mk('w:basedOn', {'val': cap}))
+            s.append(mk('w:qFormat'))
+            pp = s.makeelement(q('w:pPr'))
+            pp.append(mk('w:keepNext'))
+            pp.append(mk('w:jc', {'val': 'left'}))
+            s.append(pp)
+            st.by_id[cap].addnext(s)
+            st.by_id[title] = s
+            d.log['Styles created'].append(f'{title}: block titles, based on {cap}')
+        pp = ppr(p)
+        old = pp.find(q('w:pStyle'))
+        if old is not None:
+            remove(old)
+        pp.insert(0, mk('w:pStyle', {'val': want}))
+        d.log[label].append(snippet(text))
+        n += 1
+    return n
+
+
+def rule_promote(d):
+    """§11.4 The direct formatting most of a style's text carries becomes part of that style."""
+    st = d.styles()
+    by_style = defaultdict(list)
+    for root in d.stories:
+        for p in root.iter(P):
+            by_style[p_style(p, st)].append(p)
+    n = 0
+    for sid, ps in by_style.items():
+        if sid not in st.by_id:
+            continue
+        # run properties, weighted by characters; runs with a character style are its business
+        weight, votes = 0, defaultdict(Counter)
+        for p in ps:
+            for r, txt in text_runs(p):
+                if r.find('w:rPr/w:rStyle', NS) is not None:
+                    continue
+                weight += len(txt)
+                rpr = r.find(RPR)
+                for name in ('rFonts', 'sz', 'color', 'b', 'i'):
+                    el = rpr.find(q('w:' + name)) if rpr is not None else None
+                    votes[name][None if el is None else etree.tostring(el)] += len(txt)
+        for name, c in votes.items():
+            val, cnt = c.most_common(1)[0]
+            if val is None or cnt * 2 <= weight:
+                continue
+            el = etree.fromstring(val)
+            if name == 'rFonts' and keep_font(el):
+                continue
+            cur = style_prop(st, sid, 'rPr', name)
+            if cur is not None and rvalue(cur) == rvalue(el):
+                continue
+            rpr = style_el(st, sid, 'rPr')
+            old = rpr.find(q('w:' + name))
+            if old is not None:
+                remove(old)
+            insert_ordered(rpr, el, RPR_ORDER)
+            if name == 'sz':
+                for x in rpr.findall(q('w:szCs')):
+                    remove(x)
+                insert_ordered(rpr, mk('w:szCs', attrs(el)), RPR_ORDER)
+            d.log['Formatting promoted into styles'].append(f'{sid}: {name} {rvalue(el)}')
+            n += 1
+        # paragraph spacing, per attribute, over the style's non-empty paragraphs
+        texts = [p for p in ps if Text(p).text.replace('\x00', '').strip()]
+        sv = defaultdict(Counter)
+        for p in texts:
+            sp = p.find('w:pPr/w:spacing', NS)
+            got = attrs(sp) if sp is not None else {}
+            for k in ('before', 'after', 'line', 'lineRule'):
+                sv[k][got.get(k)] += 1
+        for k, c in sv.items():
+            val, cnt = c.most_common(1)[0]
+            if val is None or cnt * 2 <= len(texts):
+                continue
+            cur = style_prop(st, sid, 'pPr', 'spacing')
+            if cur is not None and cur.get(q('w:' + k)) == val:
+                continue
+            sp, _ = ensure(style_el(st, sid, 'pPr'), 'spacing', PPR_ORDER)
+            sp.set(q('w:' + k), val)
+            d.log['Formatting promoted into styles'].append(f'{sid}: spacing {k}={val}')
+            n += 1
+        # alignment, over the style's non-empty paragraphs
+        jc = Counter(wv(p.find('w:pPr/w:jc', NS)) for p in texts)
+        if jc and st.outline(sid) is None:      # headings stay left-aligned
+            val, cnt = jc.most_common(1)[0]
+            cur = wv(style_prop(st, sid, 'pPr', 'jc'))
+            if val is not None and cnt * 2 > len(texts) and cur != val:
+                set_attrs(ensure(style_el(st, sid, 'pPr'), 'jc', PPR_ORDER)[0], {'val': val})
+                d.log['Formatting promoted into styles'].append(f'{sid}: jc {val}')
+                n += 1
+    return n
+
+
+def rule_strip_direct(d):
+    """§11.5 Remove direct formatting: looks always, emphasis only where the style already has it."""
+    st = d.styles()
+    n = 0
+    for root in d.stories:
+        for p in root.iter(P):
+            sid = p_style(p, st)
+            pp = p.find(PPR)
+            seen = set()
+            for r, _ in text_runs(p):
+                rpr = r.find(RPR)
+                if rpr is not None:
+                    for el in list(rpr):
+                        if local(el) in ('rFonts', 'sz', 'color') and \
+                                not (local(el) == 'rFonts' and keep_font(el)):
+                            cur = style_prop(st, sid, 'rPr', local(el))
+                            if cur is None or rvalue(cur) != rvalue(el):
+                                seen.add(local(el))
+            if seen and root is d.xml(d.main) and re.fullmatch(r'toc \d', wv(st.by_id[sid].find(q('w:name')))
+                                                                if sid in st.by_id else '') :
+                d.stats['TOC entries with mixed fonts'] = d.stats.get('TOC entries with mixed fonts', 0) + 1
+            elif seen and root is d.xml(d.main):
+                d.log['Formatting artifacts removed (font / size / colour differing from the style)'].append(
+                    f'{sid}: {", ".join(sorted(seen))} — {snippet(Text(p).text, 70)}')
+            for r in p.iter(R):
+                rpr = r.find(RPR)
+                if rpr is None:
+                    continue
+                rs = wv(rpr.find(q('w:rStyle')))
+                for el in list(rpr):
+                    name = local(el)
+                    if name in COSMETIC_R:
+                        if name == 'rFonts' and keep_font(el):
+                            continue
+                        if name == 'lang' and rs:
+                            continue
+                        remove(el)
+                        n += 1
+                    elif name in SEMANTIC_R and not rs:
+                        cur = style_prop(st, sid, 'rPr', name)
+                        if (cur is not None and rvalue(cur) == rvalue(el)) or \
+                                (cur is None and rvalue(el) is False):
+                            remove(el)
+                            n += 1
+                if len(rpr) == 0:
+                    remove(rpr)
+            if pp is not None:
+                mark = pp.find(RPR)
+                if mark is not None:
+                    for el in list(mark):
+                        if local(el) in COSMETIC_R | SEMANTIC_R:
+                            remove(el)
+                            n += 1
+                for el in list(pp):
+                    name = local(el)
+                    if name in FLOW_P:
+                        cur = style_prop(st, sid, 'pPr', name)
+                        if is_on(el) == bool(is_on(cur)):
+                            remove(el)
+                            n += 1
+                        continue
+                    if name not in COSMETIC_P:
+                        continue
+                    if name == 'ind' and is_list(p):
+                        kept = {k: v for k, v in attrs(el).items() if k not in ('right', 'end')}
+                        if kept != attrs(el):
+                            set_attrs(el, kept)
+                            n += 1
+                        continue
+                    remove(el)
+                    n += 1
+        for el in list(root.iter(q('w:proofErr'))):
+            remove(el)
+            n += 1
+    return n
+
+
+def dark_grey(color):
+    try:
+        r, g, b = (int(color[i:i + 2], 16) for i in (0, 2, 4))
+    except (TypeError, ValueError):
+        return False
+    return max(r, g, b) < 0x50 and max(r, g, b) - min(r, g, b) < 0x20
+
+
+def rule_house_style(d):
+    """§11.6 Body text: justified, 6 pt before/after, black, hyphenated; standard (theme) fonts."""
+    st = d.styles()
+    root = d.xml(d.part('styles'))
+    body, _, _ = roles(d, st)
+    n = 0
+    if body in st.by_id:
+        pp = style_el(st, body, 'pPr')
+        n += set_attrs(ensure(pp, 'jc', PPR_ORDER)[0], {'val': BODY_JC})
+        sp, _ = ensure(pp, 'spacing', PPR_ORDER)
+        for k, v in BODY_SPACING.items():
+            if sp.get(q('w:' + k)) != v:
+                sp.set(q('w:' + k), v)
+                n += 1
+        for el in pp.findall(q('w:suppressAutoHyphens')):
+            remove(el)
+            n += 1
+    # exact line height clips pictures and large glyphs: single spacing instead
+    for sp in root.iter(q('w:spacing')):
+        if sp.getparent().tag == PPR and sp.get(q('w:lineRule')) == 'exact':
+            sp.set(q('w:line'), '240')
+            sp.set(q('w:lineRule'), 'auto')
+            n += 1
+    heading_styles = {sid for sid in st.by_id if (st.outline(sid) is not None and st.outline(sid) < 9)}
+    for s in root.iter(q('w:style')):
+        sid = s.get(q('w:styleId'))
+        for rf in list(s.iter(q('w:rFonts'))):
+            if keep_font(rf):
+                continue
+            want = 'majorHAnsi' if sid in heading_styles else None
+            if want is None:
+                remove(rf)
+                n += 1
+            elif attrs(rf) != {'asciiTheme': want, 'hAnsiTheme': want, 'eastAsiaTheme': 'majorEastAsia',
+                               'cstheme': 'majorBidi'}:
+                set_attrs(rf, {'asciiTheme': want, 'hAnsiTheme': want, 'eastAsiaTheme': 'majorEastAsia',
+                               'cstheme': 'majorBidi'})
+                n += 1
+        for c in list(s.iter(q('w:color'))):
+            if c.getparent().tag == RPR and (wv(c) == '000000' or dark_grey(wv(c))) and not c.get(q('w:themeColor')):
+                remove(c)
+                n += 1
+    # headings never end a page: keep with next; a level-1 heading starts a new page
+    for sid in heading_styles:
+        pp = style_el(st, sid, 'pPr')
+        n += set_flag(pp, 'keepNext', PPR_ORDER)
+        if st.outline(sid) == 0:
+            n += set_flag(pp, 'pageBreakBefore', PPR_ORDER)
+    # heading styles whose chain lost every font: give the top heading style the theme heading font
+    for sid in heading_styles:
+        if style_prop(st, sid, 'rPr', 'rFonts') is None:
+            insert_ordered(style_el(st, sid, 'rPr'), mk('w:rFonts', {
+                'asciiTheme': 'majorHAnsi', 'hAnsiTheme': 'majorHAnsi', 'eastAsiaTheme': 'majorEastAsia',
+                'cstheme': 'majorBidi'}), RPR_ORDER)
+            n += 1
+    # TOC levels share one size: the most common among the levels that set one
+    tocs = [sid for sid, s in st.by_id.items() if re.fullmatch(r'toc \d', wv(s.find(q('w:name'))) or '')]
+    sizes = Counter(wv(style_prop(st, sid, 'rPr', 'sz')) for sid in tocs if style_prop(st, sid, 'rPr', 'sz') is not None)
+    if sizes:
+        size = sizes.most_common(1)[0][0]
+        for sid in tocs:
+            if wv(style_prop(st, sid, 'rPr', 'sz')) != size:
+                rpr = style_el(st, sid, 'rPr')
+                for tag in ('sz', 'szCs'):
+                    for x in rpr.findall(q('w:' + tag)):
+                        remove(x)
+                    insert_ordered(rpr, mk('w:' + tag, {'val': size}), RPR_ORDER)
+                n += 1
+    # document defaults: theme body font, black, the language most of the text is in
+    defaults = root.find('w:docDefaults/w:rPrDefault/w:rPr', NS)
+    if defaults is not None:
+        rf = defaults.find(q('w:rFonts'))
+        want = {'asciiTheme': 'minorHAnsi', 'hAnsiTheme': 'minorHAnsi', 'eastAsiaTheme': 'minorEastAsia',
+                'cstheme': 'minorBidi'}
+        if rf is None:
+            rf = insert_ordered(defaults, mk('w:rFonts'), RPR_ORDER)
+        n += set_attrs(rf, want)
+        for c in defaults.findall(q('w:color')):
+            remove(c)
+            n += 1
+        lang = d.stats.get('text language')
+        if lang:
+            el, _ = ensure(defaults, 'lang', RPR_ORDER)
+            if wv(el) != lang:
+                el.set(q('w:val'), lang)
+                n += 1
+    settings = d.settings
+    if settings is not None:
+        n += set_flag(settings, 'autoHyphenation', SETTINGS_ORDER)
+        n += set_flag(settings, 'doNotHyphenateCaps', SETTINGS_ORDER)
+        # a stored "spelling: clean" makes Word skip checking text that has changed since
+        for tag in ('embedTrueTypeFonts', 'embedSystemFonts', 'saveSubsetFonts', 'proofState'):
+            for el in settings.findall(q('w:' + tag)):
+                remove(el)
+                n += 1
+    n += clean_fonts(d)
+    return n
+
+
+def text_language(d):
+    """The run language most characters carry (before 11.5 strips it)."""
+    c = Counter()
+    for p in d.xml(d.main).iter(P):
+        for r, txt in text_runs(p):
+            c[wv(r.find('w:rPr/w:lang', NS))] += len(txt)
+    c.pop(None, None)
+    return c.most_common(1)[0][0] if c else None
+
+
+def clean_fonts(d):
+    """Embedded font files and font-table entries nothing refers to any more."""
+    n = 0
+    ft_name = d.part('fontTable')
+    ft = d.xml(ft_name)
+    if ft is None:
+        return 0
+    for font in ft.findall(q('w:font')):
+        for el in list(font):
+            if local(el).startswith('embed'):
+                remove(el)
+                n += 1
+    used = set()
+    for name in d.pkg.names:
+        if name.endswith('.xml') and name != ft_name and name.startswith(posixpath.dirname(d.main) + '/'):
+            for rf in d.xml(name).iter(q('w:rFonts')):
+                used |= {v for k, v in rf.attrib.items() if not k.endswith('Theme') and not k.endswith('theme')}
+    theme = d.xml((d.pkg.related(d.main, 'theme') or [None])[0])
+    if theme is not None:
+        used |= {el.get('typeface') for el in theme.iter('{http://schemas.openxmlformats.org/drawingml/2006/main}latin')}
+    for font in ft.findall(q('w:font')):
+        if wv(font, 'name') not in used and not KEEP_FONTS.match(wv(font, 'name') or ''):
+            remove(font)
+            n += 1
+    for rel, target, rtype in d.pkg.rels(ft_name):
+        if rtype.endswith('/font'):
+            n += d.pkg.delete(target)
+    return n
+
+
+def rule_tables(d):
+    """§11.7 Cells: 0.1" padding, top-left text; header paragraphs carry no spacing of their own."""
+    st = d.styles()
+    _, cell, head = roles(d, st)
+    n = 0
+    mar = lambda: [mk('w:' + side, {'w': CELL_MARGIN, 'type': 'dxa'}) for side in ('top', 'left', 'bottom', 'right')]
+    want = [(f'top', CELL_MARGIN), ('left', CELL_MARGIN), ('bottom', CELL_MARGIN), ('right', CELL_MARGIN)]
+    def set_mar(tblpr):
+        cm = tblpr.find(q('w:tblCellMar'))
+        if cm is not None and [(local(c), wv(c, 'w')) for c in cm] == want:
+            return 0
+        if cm is not None:
+            remove(cm)
+        cm = insert_ordered(tblpr, mk('w:tblCellMar'), TBLPR_ORDER)
+        cm.extend(mar())
+        return 1
+    for root in d.stories:
+        for tbl in root.iter(TBL):
+            tp = tbl.find(q('w:tblPr'))
+            if tp is None:
+                tp = mk('w:tblPr')
+                tbl.insert(0, tp)
+            n += set_mar(tp)
+            for tc in tbl.iter(q('w:tc')):
+                tcp = tc.find(q('w:tcPr'))
+                if tcp is None:
+                    continue
+                for el in tcp.findall(q('w:tcMar')) + tcp.findall(q('w:vAlign')):
+                    if el.tag == q('w:vAlign') and wv(el) == 'top':
+                        continue
+                    remove(el)
+                    n += 1
+    used_tbl = {wv(el) for root in d.stories for el in root.iter(q('w:tblStyle'))}
+    for sid in used_tbl:
+        for s in st.chain(sid):
+            if s.get(q('w:type')) != 'table':
+                continue
+            tp = s.find(q('w:tblPr'))
+            if tp is not None and tp.find(q('w:tblCellMar')) is not None:
+                n += set_mar(tp)
+            for el in list(s.iter(q('w:vAlign'))):
+                if wv(el) != 'top':
+                    remove(el)
+                    n += 1
+    for sid in {cell, head} - {None}:
+        n += set_attrs(ensure(style_el(st, sid, 'pPr'), 'jc', PPR_ORDER)[0], {'val': 'left'})
+    if head in st.by_id:
+        sp, _ = ensure(style_el(st, head, 'pPr'), 'spacing', PPR_ORDER)
+        for k in ('before', 'after'):
+            if sp.get(q('w:' + k)) != '0':
+                sp.set(q('w:' + k), '0')
+                n += 1
+        for k in ('beforeAutospacing', 'afterAutospacing'):
+            if sp.get(q('w:' + k)) is not None:
+                del sp.attrib[q('w:' + k)]
+                n += 1
+    return n
+
+
+def page_break_only(p):
+    """A paragraph whose only content is page breaks (and empty runs)."""
+    brs = [b for b in p.iter(q('w:br')) if wv(b, 'type') == 'page']
+    return bool(brs) and is_empty_but(p, brs)
+
+
+def is_empty_but(p, allowed):
+    for el in tokens(p):
+        if el in allowed:
+            continue
+        if el.tag == T and not (el.text or '').strip():
+            continue
+        if el.tag in LAYOUT_ONLY:
+            continue
+        return False
+    return p.find('.//w:sectPr', NS) is None
+
+
+def rule_heading_pages(d):
+    """§11.8 Level-1 headings start a page through their style only: a manual page break right
+    before one would leave a blank page, and an empty heading at the very end adds one."""
+    st = d.styles()
+    body = d.xml(d.main).find(q('w:body'))
+    n = 0
+    for p in list(body.iter(P)):
+        if p.getparent() is not body or d.heading_level(p, st) != 1:
+            continue
+        prev = p.getprevious()
+        while prev is not None and prev.tag != P and prev.tag != TBL and local(prev) in (
+                'bookmarkStart', 'bookmarkEnd', 'proofErr', 'permStart', 'permEnd'):
+            prev = prev.getprevious()
+        if prev is None or prev.tag != P:
+            continue
+        text = Text(p).text.replace('\x00', '').strip()
+        if page_break_only(prev) and not any(True for _ in prev.iter(q('w:bookmarkStart'))):
+            remove(prev)
+            d.log['Manual page breaks before level-1 headings removed'].append(snippet(text) or '(empty heading)')
+            n += 1
+            continue
+        runs = [r for r in prev.findall(R) if Text(r).text.strip() or r.find(q('w:br')) is not None]
+        if runs:
+            last = runs[-1]
+            brs = [b for b in last.findall(q('w:br')) if wv(b, 'type') == 'page']
+            if brs and brs[-1] is [c for c in last if c.tag != RPR][-1]:
+                remove(brs[-1])
+                d.log['Manual page breaks before level-1 headings removed'].append(snippet(text))
+                n += 1
+    # empty headings at the end of the body (nothing but empty paragraphs after them)
+    tail = [b for b in body if b.tag in (P, TBL)]
+    while tail and tail[-1].tag == P and is_empty(tail[-1]) and tail[-1].find('.//w:sectPr', NS) is None:
+        p = tail.pop()
+        if d.heading_level(p, st) and not any(True for _ in p.iter(q('w:bookmarkStart'))):
+            remove(p)
+            d.log['Empty headings at the end of the document removed'].append(f'H{d.heading_level(p, st)} {p_style(p, st)}')
+            n += 1
+    return n
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1153,6 +1819,14 @@ RULES = [
     ('8.7 protection', rule_protection),
     ('8.9 temp bookmarks', rule_temp_bookmarks),
     ('8.10 rsid (optional)', rule_strip_rsid),
+    ('11.1 unstyled body paragraphs', rule_unstyled),
+    ('11.2 headings set as body text', rule_heading_gaps),
+    ('11.3 captions and block titles', rule_captions),
+    ('11.4 promote formatting into styles', rule_promote),
+    ('11.5 strip direct formatting', rule_strip_direct),
+    ('11.6 house style', rule_house_style),
+    ('11.7 table cells', rule_tables),
+    ('11.8 level-1 headings start a page', rule_heading_pages),
     ('1 page size & margins', rule_page_setup),
     ('2 table width', rule_table_width),
     ('3 table page breaks', rule_table_breaks),
@@ -1167,12 +1841,26 @@ RULES = [
 ]
 
 
-def converge(d):
+def rule_number(name):
+    return name.split()[0]
+
+
+def select_rules(only):
+    """RULES limited to the given spec numbers (all of them when none are given)."""
+    if not only:
+        return RULES
+    unknown = only - {rule_number(n) for n, _ in RULES}
+    if unknown:
+        sys.exit('✗ unknown rule number(s): ' + ', '.join(sorted(unknown)))
+    return [(n, fn) for n, fn in RULES if rule_number(n) in only]
+
+
+def converge(d, rules):
     """Full passes until one makes 0 changes. Returns [ {rule: count}, ... ] per pass."""
     passes = []
     while True:
         d.findings = defaultdict(list)
-        counts = {name: fn(d) for name, fn in RULES}
+        counts = {name: fn(d) for name, fn in rules}
         passes.append(counts)
         if not any(counts.values()):
             return passes, True
@@ -1245,12 +1933,13 @@ def stage(title):
     print(f'\n\033[38;5;208m▶ {title}\033[0m')
 
 
-def write_report(path, src, out, passes, converged, d, results):
+def write_report(path, src, out, passes, converged, d, results, rules):
     lines = [f'# docx_fix report', '', f'- Input: `{src}`', f'- Output: `{out or "(check only)"}`',
+             f'- Rules: {"all" if rules is RULES else ", ".join(rule_number(n) for n, _ in rules)}',
              f'- Passes: {len(passes)} ({"converged" if converged else "NOT converged"})', '',
              '## Changes per pass', '', '| Rule | ' + ' | '.join(f'Pass {i}' for i in range(1, len(passes) + 1)) + ' |',
              '|---|' + '---:|' * len(passes)]
-    for name, _ in RULES:
+    for name, _ in rules:
         lines.append(f'| {name} | ' + ' | '.join(str(p[name]) for p in passes) + ' |')
     lines += ['', '## Document stats', ''] + [f'- {k}: {v}' for k, v in d.stats.items()]
     lines += ['', '## Changes made', '']
@@ -1273,6 +1962,7 @@ def parse_args(argv):
     ap.add_argument('--heading-style', action='append', default=[])
     ap.add_argument('--leadin', action='append', default=[])
     ap.add_argument('--strip-rsid', action='store_true')
+    ap.add_argument('--only', action='append', default=[])
     try:
         args = ap.parse_args(argv)
         args.heading_styles = {k: int(v) for k, v in (x.split('=') for x in args.heading_style)}
@@ -1280,6 +1970,7 @@ def parse_args(argv):
         print(__doc__, file=sys.stderr)
         sys.exit(2)
     args.leadins = set(args.leadin)
+    args.only = {x.strip() for v in args.only for x in v.split(',') if x.strip()}
     if args.mode == 'check' and args.out:
         print(__doc__, file=sys.stderr)
         sys.exit(2)
@@ -1299,11 +1990,12 @@ def main():
     pkg = Package(src)
     d = Doc(pkg, args)
     print(f'{os.path.basename(src)}: {len(pkg.names)} parts, main part {d.main}')
+    rules = select_rules(args.only)
 
     stage('Rules (convergent passes)')
-    passes, converged = converge(d)
-    width = max(len(n) for n, _ in RULES)
-    for name, _ in RULES:
+    passes, converged = converge(d, rules)
+    width = max(len(n) for n, _ in rules)
+    for name, _ in rules:
         counts = [p[name] for p in passes]
         if any(counts):
             print(f'  {name:<{width}}  ' + ' → '.join(map(str, counts)))
@@ -1329,7 +2021,7 @@ def main():
         ok = bad is None
         print(f'  {out} ({os.path.getsize(src):,} → {os.path.getsize(out):,} bytes, {len(pkg.names)} parts)'
               + ('' if ok else f' — zip test failed on {bad}'))
-    write_report(report, src, out if ok else None, passes, converged, d, results)
+    write_report(report, src, out if ok else None, passes, converged, d, results, rules)
     print(f'  report: {report}')
 
     if not ok:

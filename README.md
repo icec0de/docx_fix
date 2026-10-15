@@ -19,6 +19,9 @@ reported, never changed silently.
 | Text | Spaced number ranges → en dash (`$100K - $1M` → `$100K–$1M`); leading/trailing spaces trimmed; double spaces collapsed |
 | Structure | Runs of 2+ empty paragraphs collapsed to one; empty headings reported |
 | Sanitize | Accept all tracked changes; remove all comments (with their parts); strip author/company metadata; remove macros, OLE embeds, hidden text, proofing marks, protection, `_GoBack` bookmarks; drop unused styles, numbering, relationships and media |
+| Styles | Unstyled paragraphs and headings typed as body text get their styles; captions and block titles get their own styles; dominant direct formatting is promoted into styles and the rest stripped (fonts, sizes, colours, spacing, indents); emphasis is kept |
+| House style | Body justified, 6 pt before/after, auto hyphenation; theme fonts; black text; equal TOC levels; embedded fonts removed |
+| Table cells | 0.1" padding on all sides, text top-left, header rows without their own spacing |
 | TOC | Mark all fields dirty and set `updateFields`, so Word rebuilds the TOC and page numbers on open |
 
 Lead-in punctuation is the only text-meaning rule. A `.`-ending sentence before
@@ -52,6 +55,9 @@ Options:
   final `.` to `:` (repeatable).
 - `--strip-rsid` — also remove rsid editing fingerprints and tell Word to keep
   personal information out of future saves.
+- `--only N[,N...]` — run only the rules with these spec section numbers, e.g.
+  `--only 8.1,8.2` accepts tracked changes and removes comments without touching
+  layout or text. All verification checks still run.
 
 Each run also writes `<output>.report.md` (or `<input>_check.report.md` for
 `check`). It contains:
@@ -66,6 +72,47 @@ Each run also writes `<output>.report.md` (or `<input>_check.report.md` for
 2. Decide the lead-ins under review; accept the right ones with `--leadin ID`.
 3. `fix` the document.
 4. Open the result in Word once so the TOC and page numbers refresh, then save.
+
+## Rendering with Microsoft Word (macOS)
+
+`docx_fix` does not paginate. To see the result and rebuild the TOC and page
+numbers, let Word open the file and save a PDF:
+
+```bash
+osascript word_pdf.applescript "$PWD/report_fixed.docx" "$PWD/report_fixed.pdf"
+```
+
+The script opens the document, updates every table of contents, saves the PDF and
+closes that document without saving it. Other open documents are left alone. Both
+paths must be absolute.
+
+Rule 9 (TOC refresh) sets `updateFields`, which makes Word ask on open whether to
+update fields. That question blocks a scripted run, so render a file fixed without
+rule 9 (`--only` without `9`). The script updates the tables of contents itself.
+
+### File access: grant your home folder once
+
+Word for Mac is sandboxed. It opens a file outside its own container only from a
+folder the user has granted. For a new folder it shows a *Grant File Access*
+dialog that offers exactly the folder of the file being opened. You can't pick a
+parent folder there. If the file is in a hidden folder such as `/tmp`, the dialog
+names a folder that Finder doesn't show.
+
+To be asked once for your whole home folder, run:
+
+```bash
+sh word_grant_access.sh          # or: sh word_grant_access.sh /path/to/folder
+```
+
+It puts a throwaway document in your home folder, opens and closes it in Word,
+and deletes it. When the dialog appears, click **Grant Access**. Word keeps the
+grant for that folder and everything below it, so later runs in any subfolder
+don't ask again.
+
+Keep inputs and outputs under the granted folder, not in `/tmp`. The repo's
+`render/` folder (gitignored) is there for that. The first `osascript` run also
+asks once whether your terminal may control Microsoft Word (System Settings →
+Privacy & Security → Automation).
 
 ## Safety
 

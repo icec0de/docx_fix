@@ -30,6 +30,9 @@ Options:
   has no `outlineLvl` (e.g. a custom subheading style: `--heading-style Subheading=3`).
 - `--leadin ID` — accept a §10a review candidate (8-hex ID from the report) and convert its `.`→`:`.
 - `--strip-rsid` — also run the optional §8.10 step.
+- `--only N[,N…]` — run only the rules with these section numbers (e.g. `--only 8.1,8.2`: accept
+  tracked changes and remove comments, leave layout and text untouched). Verification still runs
+  in full. For a document whose layout the authors own, rules are applied one group at a time.
 
 Outputs: the fixed `.docx` and `<out>.report.md` — changes per rule per pass, what was changed
 (lead-ins converted, tables newly given a repeating header), findings for review (§7a empty headings,
@@ -213,6 +216,8 @@ a bookmark/anchor target — check for `bookmarkStart` / TOC `_Toc` refs before 
 
 ### 7b. Excessive blank lines
 **Check:** runs of consecutive empty paragraphs (no text, no drawing/field).
+Also inside a paragraph: a line break (`w:br`, text wrapping) that repeats another one, or opens or
+closes the paragraph, makes an empty line — remove it.
 **Fix:** collapse any run of **≥2** empty paragraphs down to **1** (keep a single intentional
 spacer; never zero them out — that changes section spacing). Do not remove an empty paragraph that
 holds a `w:sectPr` (section break) or a bookmark anchor.
@@ -320,6 +325,98 @@ directional "which way does it bind" score; a lead-in should sit closer to what 
 for the ambiguous remainder, use an LLM classifier or embedding-similarity with a conservative
 threshold, and **route low-confidence cases to human review** (or mark them as Word comments) instead
 of editing. Never let the semantic layer make a silent, unreviewable text change.
+
+---
+
+## 11. Styles instead of direct formatting
+
+Goal: every paragraph's look comes from its style. Formatting that different editors applied by
+hand (fonts, sizes, colours, spacing, indents) is folded into styles or removed. What remains
+direct is only what carries meaning: emphasis (bold, italic, underline, strike, caps),
+sub/superscript, list numbering, keep-with-next / keep-lines / page breaks, tabs, frames.
+
+Fixed sub-order inside a pass: assign styles (11.1–11.3) → promote (11.4) → strip (11.5) → house
+style (11.6, 11.7). After one pass nothing direct is left to vote on, so the next pass is a no-op.
+
+**Roles.** The *body style* is the style holding the most text in body-level, non-heading, non-list
+paragraphs. The *cell* / *header* styles hold the most text in table rows after the first / in the
+first row.
+
+### 11.1 Unstyled body paragraphs
+A body-level paragraph in the default paragraph style, with text, not a heading and not a frame,
+gets the body style.
+
+### 11.2 Headings set as body text
+Between two same-style headings numbered `N.k` and `N.k+2`, a paragraph whose text starts with
+`N.k+1`, is under 160 characters and has no final `.`/`:`/`;` gets that heading style. (Typical
+cause: a heading typed in the body style with a large font; it is missing from the TOC.)
+
+### 11.3 Captions and block titles
+- A paragraph starting `Рисунок N` / `Рис. N` / `Таблица N` / `Figure N` / `Table N` in the body
+  or caption style gets the caption style (the most used style whose name contains "caption").
+- A short line (< 120 characters), fully italic, without final punctuation, directly above a table
+  or picture (empty paragraphs skipped), gets a *title* style `<caption>Title`, created on first
+  use: based on the caption style, left-aligned, keep-with-next. Figure captions and block titles
+  can then carry different alignment in their styles.
+
+### 11.4 Promote the dominant direct formatting into the style
+Per paragraph style, over its paragraphs in all stories:
+- run properties `rFonts`, `sz`, `color`, `b`, `i`: weighted by characters (runs with a character
+  style are skipped); a direct value carried by more than half of the text replaces the style's
+  value. Symbol, math and monospace fonts are never promoted.
+- paragraph `spacing`, per attribute (`before`, `after`, `line`, `lineRule`): a value set directly
+  on more than half of the non-empty paragraphs goes into the style.
+- `jc`: same majority rule, except heading styles (headings stay left-aligned).
+
+### 11.5 Strip direct formatting
+- Runs: remove `rFonts` (except symbol/math/monospace fonts), `sz`, `szCs`, `color`, `highlight`,
+  `kern`, `w`, character `spacing`, `noProof`, `lang` (kept on runs with a character style).
+  Remove `b`/`i`/`u`/`strike`/`dstrike`/`caps`/`smallCaps`/`vertAlign` only when the style resolves
+  to the same value, or when the run turns it off and the style never turns it on.
+- Paragraph marks: remove all run properties of the mark.
+- Paragraphs: remove `spacing`, `ind`, `jc`, `contextualSpacing`, `suppressAutoHyphens`.
+  Remove `keepNext`/`keepLines`/`pageBreakBefore`/`widowControl` where the style already resolves
+  to the same value. On list
+  items keep `ind` except its right indent (the list's own indent may live there).
+- Remove `proofErr` markers.
+- Report every body paragraph whose runs had a font, size or colour different from its style
+  (copy/paste artifacts); for TOC entries only a count.
+
+### 11.6 House style
+- Exact line height in any style (`lineRule=exact`) becomes single (`line=240 auto`): an exact
+  height clips inline pictures in paragraphs of that style.
+- Body style: justified, 6 pt before and after (`before=120`, `after=120`), no
+  `suppressAutoHyphens`.
+- Fonts: remove every non-symbol `rFonts` from styles; document defaults use the theme body font
+  (`minorHAnsi`), heading styles (outline level 0–8) the theme heading font (`majorHAnsi`).
+- Colour: black text — remove black and dark-grey colours (all channels < 0x50, spread < 0x20)
+  from styles and document defaults; accent colours (headings, captions) stay.
+- Language: document default `lang` = the run language most characters carried before 11.5, so
+  spelling and hyphenation work after per-run languages are removed.
+- Headings: every heading style (outline level 0–8) has `keepNext`, so a heading never stays at
+  the bottom of a page without its text; level-1 heading styles have `pageBreakBefore`, so each
+  level-1 heading starts a new page.
+- TOC levels (`toc N` styles) share one size: the most common size among the levels that set one.
+- `settings.xml`: `autoHyphenation`, `doNotHyphenateCaps`; remove `embedTrueTypeFonts`,
+  `embedSystemFonts`, `saveSubsetFonts` and `proofState` (a stored "clean" makes Word skip
+  checking changed text). Delete embedded font parts and font-table entries nothing refers to.
+
+### 11.7 Table cells
+- Every table and every table style that sets cell margins: `tblCellMar` 0.1" (`144`) on all
+  four sides. Remove per-cell `tcMar`.
+- Text top-left: remove `vAlign` other than `top` from cells and table styles (top is the
+  default); cell and header styles get `jc=left`.
+- Header style: `spacing before=0 after=0` — the header's space comes from the cell margins only.
+
+### 11.8 Level-1 headings start a page through their style only
+- A paragraph holding only a manual page break right before a level-1 heading is removed; a page
+  break ending the previous paragraph is removed. Otherwise the break plus the style's
+  `pageBreakBefore` leave a blank page.
+- Empty heading paragraphs at the very end of the body (only empty paragraphs after them, no
+  bookmarks) are removed: with `pageBreakBefore` each adds a blank last page.
+
+**Verify:** text of all stories is unchanged except whitespace (§6); the result opens in Word, and
+a Word-made PDF shows one font family, no stray indents, top-left cells.
 
 ---
 
