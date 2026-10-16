@@ -12,7 +12,7 @@ reported, never changed silently.
 
 | Area | Rule |
 | --- | --- |
-| Page setup | A4 portrait, 2.0 cm margins on all sides, 1.25 cm header/footer, no gutter |
+| Page setup | A4 portrait, 2.0 cm margins on all sides, header and footer 0.51 cm (0.2″) from the edge, no gutter |
 | Tables | Full text width (AutoFit Window); first row is a header repeated on every page; rows never split across pages |
 | Lists | Each item keeps its lines together; the whole list stays together; the paragraph introducing a list stays with it |
 | Lead-ins | `.` → `:` on a sentence that introduces a list or passage, when deterministic signals agree (see below) |

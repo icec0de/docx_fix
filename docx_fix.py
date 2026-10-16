@@ -839,7 +839,7 @@ def rule_strip_rsid(d):
 # §1-§4 Layout rules.
 
 PGSZ = {'w': '11906', 'h': '16838', 'code': '9'}
-PGMAR = {'top': '1134', 'right': '1134', 'bottom': '1134', 'left': '1134', 'header': '709', 'footer': '709',
+PGMAR = {'top': '1134', 'right': '1134', 'bottom': '1134', 'left': '1134', 'header': '288', 'footer': '288',
          'gutter': '0'}
 
 

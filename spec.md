@@ -95,14 +95,14 @@ Digital distribution → symmetric margins, no binding gutter.
 **Fix — for every `w:sectPr`:**
 - Page size **A4**: `w:pgSz w:w="11906" w:h="16838" w:code="9"`, remove `w:orient` (portrait).
 - Margins **2.0 cm** all sides: `w:pgMar` top/bottom/left/right = `1134` twips.
-- Header & footer **1.25 cm**: `w:header`/`w:footer` = `709`; `w:gutter="0"`.
+- Header & footer **0.51 cm (0.2″)** from the page edge: `w:header`/`w:footer` = `288`; `w:gutter="0"`.
   (twips = cm × 566.929; 1440 twips/inch.)
 
 **Mechanics:** remove any existing `pgSz`/`pgMar` in the section and insert single fresh ones in
 `CT_SectPr` order (`…type, pgSz, pgMar, paperSrc…`). Do **not** use `find() or SubElement()` — it
 duplicates the element (see Appendix A).
 
-**Check:** exactly one `pgSz` (11906×16838) and one `pgMar` (all 1134/709) per section.
+**Check:** exactly one `pgSz` (11906×16838) and one `pgMar` (margins 1134, header/footer 288) per section.
 
 ---
 
