@@ -1657,6 +1657,13 @@ def rule_house_style(d):
         for ind in list(st.by_id[sid].iter(q('w:ind'))):
             remove(ind)
             n += 1
+    # level-1 TOC entries (chapters) get 18 pt above, which groups each chapter's sections
+    for sid in tocs:
+        if wv(st.by_id[sid].find(q('w:name'))) == 'toc 1':
+            sp, _ = ensure(style_el(st, sid, 'pPr'), 'spacing', PPR_ORDER)
+            if sp.get(q('w:before')) != TOC1_BEFORE:
+                sp.set(q('w:before'), TOC1_BEFORE)
+                n += 1
     n += toc_levels(d)
     # document defaults: theme body font, black, the language most of the text is in
     defaults = root.find('w:docDefaults/w:rPrDefault/w:rPr', NS)
@@ -1727,6 +1734,9 @@ def apply_scheme(d, st, text):
                             shd.attrib.pop(q('w:' + k), None)
                         n += 1
     return n
+
+
+TOC1_BEFORE = '360'  # 18 pt
 
 
 def toc_levels(d):

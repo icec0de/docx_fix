@@ -409,6 +409,7 @@ Per paragraph style, over its paragraphs in all stories:
 - TOC levels (`toc N` styles) share one size: the most common size among the levels that set one.
 - TOC levels carry no indent: remove `w:ind` from the `toc N` styles; section numbers show the
   nesting.
+- Level-1 TOC entries (`toc 1`) get 18 pt before (`before=360`): each chapter's group is set apart.
 - `--toc-levels N`: in every `TOC` field instruction `\o "1-K"` becomes `\o "1-N"`; Word drops the
   deeper entries when it updates the TOC (§9, or the Word render).
 - `settings.xml`: `autoHyphenation`, `doNotHyphenateCaps`; remove `embedTrueTypeFonts`,

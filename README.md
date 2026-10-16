@@ -20,7 +20,7 @@ reported, never changed silently.
 | Structure | Runs of 2+ empty paragraphs collapsed to one; empty headings reported |
 | Sanitize | Accept all tracked changes; remove all comments (with their parts); strip author/company metadata; remove macros, OLE embeds, hidden text, proofing marks, protection, `_GoBack` bookmarks; drop unused styles, numbering, relationships and media |
 | Styles | Unstyled paragraphs and headings typed as body text get their styles; captions and block titles get their own styles; dominant direct formatting is promoted into styles and the rest stripped (fonts, sizes, colours, spacing, indents); emphasis is kept |
-| House style | Body justified, 6 pt before/after, auto hyphenation; theme fonts; black text and headings (colours only from a `--scheme`); equal, unindented TOC levels; embedded fonts removed |
+| House style | Body justified, 6 pt before/after, auto hyphenation; theme fonts; black text and headings (colours only from a `--scheme`); equal, unindented TOC levels with 18 pt before chapters; embedded fonts removed |
 | Captions | A picture and its caption, a caption and the table or picture under it, stay on one page |
 | Table cells | 0.1" padding on all sides, text top-left, header rows without their own spacing |
 | TOC | Mark all fields dirty and set `updateFields`, so Word rebuilds the TOC and page numbers on open |
