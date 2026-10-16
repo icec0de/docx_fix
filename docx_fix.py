@@ -21,6 +21,9 @@ Options:
     --strip-rsid           also strip rsid editing fingerprints, set removePersonalInformation
     --only N[,N...]        run only the rules with these spec numbers (e.g. --only 8.1,8.2 accepts
                            tracked changes and removes comments, leaving layout and text alone)
+    --font NAME            set the theme heading and body fonts to NAME (with rule 11.6)
+    --scheme FILE.toml     colour scheme applied after the house style (rule 11.6): [text] style
+                           (id or name) = RRGGBB|auto; [table] header_fill = RRGGBB
 
 See spec.md.
 """
@@ -31,6 +34,7 @@ import os
 import posixpath
 import re
 import sys
+import tomllib
 import zipfile
 from collections import Counter, defaultdict
 from urllib.parse import unquote
@@ -1376,6 +1380,34 @@ def rule_captions(d):
     return n
 
 
+def has_picture(p):
+    return p.find('.//w:drawing', NS) is not None or p.find('.//w:pict', NS) is not None
+
+
+def rule_figure_keep(d):
+    """§11.9 A caption stays on the page of its picture or table: a picture paragraph followed by a
+    caption keeps with next (so do empty paragraphs between them); a caption followed by a picture or
+    table keeps with next."""
+    st = d.styles()
+    n = 0
+    for p in body_paragraphs(d):
+        text = Text(p).text.replace('\x00', '').strip()
+        if has_picture(p) and not text:
+            chain, nxt = [p], p.getnext()
+            while nxt is not None and nxt.tag == P and not has_picture(nxt) \
+                    and not Text(nxt).text.replace('\x00', '').strip():
+                chain.append(nxt)
+                nxt = nxt.getnext()
+            if nxt is not None and nxt.tag == P and CAPTION_WORDS.match(Text(nxt).text.replace('\x00', '')):
+                for x in chain:
+                    if not is_on(style_prop(st, p_style(x, st), 'pPr', 'keepNext')):
+                        n += set_flag(ppr(x), 'keepNext', PPR_ORDER)
+        elif CAPTION_WORDS.match(text) and next_block(p) in ('table', 'picture') \
+                and not is_on(style_prop(st, p_style(p, st), 'pPr', 'keepNext')):
+            n += set_flag(ppr(p), 'keepNext', PPR_ORDER)
+    return n
+
+
 def rule_promote(d):
     """§11.4 The direct formatting most of a style's text carries becomes part of that style."""
     st = d.styles()
@@ -1577,6 +1609,22 @@ def rule_house_style(d):
             if c.getparent().tag == RPR and (wv(c) == '000000' or dark_grey(wv(c))) and not c.get(q('w:themeColor')):
                 remove(c)
                 n += 1
+    # headings and block titles are black by default; a colour scheme comes only from --scheme
+    scheme = scheme_styles(d, st)
+    titles = heading_styles | {sid for sid in st.by_id if sid.endswith('Title')}
+    titles |= {wv(st.by_id[sid].find(q('w:link'))) for sid in titles} - {None}
+    for sid in titles - set(scheme):
+        for c in list(st.by_id[sid].iter(q('w:color'))):
+            if c.getparent().tag == RPR:
+                remove(c)
+                n += 1
+    for story in d.stories:
+        for p in story.iter(P):
+            if p_style(p, st) in titles:
+                for c in list(p.iter(q('w:color'))):
+                    if c.getparent().tag == RPR:
+                        remove(c)
+                        n += 1
     # headings never end a page: keep with next; a level-1 heading starts a new page
     for sid in heading_styles:
         pp = style_el(st, sid, 'pPr')
@@ -1630,7 +1678,66 @@ def rule_house_style(d):
             for el in settings.findall(q('w:' + tag)):
                 remove(el)
                 n += 1
+    n += apply_scheme(d, st, scheme)
+    n += theme_font(d)
     n += clean_fonts(d)
+    return n
+
+
+def scheme_styles(d, st):
+    """--scheme: {style id: colour} for the [text] table; names resolve to ids."""
+    names = {wv(s.find(q('w:name'))): sid for sid, s in st.by_id.items()}
+    out = {}
+    for key, color in d.opts.scheme.get('text', {}).items():
+        sid = key if key in st.by_id else names.get(key)
+        if sid is None:
+            if key not in d.findings['Colour scheme: style not found']:
+                d.findings['Colour scheme: style not found'].append(key)
+            continue
+        out[sid] = color
+    return out
+
+
+def apply_scheme(d, st, text):
+    """--scheme FILE: text colours of styles ([text]) and the fill of shaded table header rows
+    ([table] header_fill). Applied after the house style made headings black."""
+    n = 0
+    for sid, color in text.items():
+        el, created = ensure(style_el(st, sid, 'rPr'), 'color', RPR_ORDER)
+        n += created + set_attrs(el, {'val': color})
+    fill = d.opts.scheme.get('table', {}).get('header_fill')
+    if fill:
+        for tbl in d.xml(d.main).iter(TBL):
+            rows = tbl.findall(q('w:tr'))
+            for i, tr in enumerate(rows):
+                if i and tr.find('w:trPr/w:tblHeader', NS) is None:
+                    continue
+                for shd in tr.iter(q('w:shd')):
+                    if shd.getparent().tag == q('w:tcPr') and (shd.get(q('w:fill')) or 'auto') not in ('auto', 'FFFFFF') \
+                            and shd.get(q('w:fill')) != fill:
+                        shd.set(q('w:fill'), fill)
+                        for k in ('themeFill', 'themeFillTint', 'themeFillShade'):
+                            shd.attrib.pop(q('w:' + k), None)
+                        n += 1
+    return n
+
+
+def theme_font(d):
+    """--font NAME: the theme's heading and body fonts become NAME, so every style that uses the
+    theme fonts (all of them, after 11.6) is set in it."""
+    name = d.opts.font
+    theme = d.xml((d.pkg.related(d.main, 'theme') or [None])[0])
+    if not name or theme is None:
+        return 0
+    n = 0
+    a = '{http://schemas.openxmlformats.org/drawingml/2006/main}'
+    for kind in ('majorFont', 'minorFont'):
+        for latin in theme.iter(a + kind):
+            el = latin.find(a + 'latin')
+            if el is not None and (el.get('typeface') != name or el.get('panose') is not None):
+                el.set('typeface', name)
+                el.attrib.pop('panose', None)
+                n += 1
     return n
 
 
@@ -1827,6 +1934,7 @@ RULES = [
     ('11.6 house style', rule_house_style),
     ('11.7 table cells', rule_tables),
     ('11.8 level-1 headings start a page', rule_heading_pages),
+    ('11.9 captions stay with pictures', rule_figure_keep),
     ('1 page size & margins', rule_page_setup),
     ('2 table width', rule_table_width),
     ('3 table page breaks', rule_table_breaks),
@@ -1963,9 +2071,18 @@ def parse_args(argv):
     ap.add_argument('--leadin', action='append', default=[])
     ap.add_argument('--strip-rsid', action='store_true')
     ap.add_argument('--only', action='append', default=[])
+    ap.add_argument('--font')
+    ap.add_argument('--scheme', dest='scheme_file')
     try:
         args = ap.parse_args(argv)
         args.heading_styles = {k: int(v) for k, v in (x.split('=') for x in args.heading_style)}
+        args.scheme = {}
+        if args.scheme_file:
+            with open(args.scheme_file, 'rb') as f:
+                args.scheme = tomllib.load(f)
+        colours = list(args.scheme.get('text', {}).values()) + list(args.scheme.get('table', {}).values())
+        if not all(re.fullmatch(r'[0-9A-Fa-f]{6}|auto', str(v)) for v in colours):
+            raise ValueError
     except (SystemExit, ValueError):
         print(__doc__, file=sys.stderr)
         sys.exit(2)

@@ -1,0 +1,11 @@
+# Colour scheme for docx_fix --scheme. Keep a document's scheme next to the document.
+# Without a scheme, headings and block titles are black.
+
+[text]
+# paragraph style (id or name) = text colour, RRGGBB or auto
+"heading 1" = "1F4E79"
+"heading 2" = "1F4E79"
+
+[table]
+# fill of shaded table header rows (white or unshaded headers are left alone)
+header_fill = "1F4E79"

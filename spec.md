@@ -389,8 +389,18 @@ Per paragraph style, over its paragraphs in all stories:
   `suppressAutoHyphens`.
 - Fonts: remove every non-symbol `rFonts` from styles; document defaults use the theme body font
   (`minorHAnsi`), heading styles (outline level 0–8) the theme heading font (`majorHAnsi`).
+  With `--font NAME` the theme's `majorFont` and `minorFont` latin typeface becomes `NAME` (panose
+  dropped), so the whole document is set in it; the font is not embedded in the .docx (a PDF
+  export embeds it).
 - Colour: black text — remove black and dark-grey colours (all channels < 0x50, spread < 0x20)
-  from styles and document defaults; accent colours (headings, captions) stay.
+  from styles and document defaults; accent colours elsewhere (captions, table fills) stay.
+- Headings are black: remove every text colour from heading styles (outline level 0–8), block-title
+  styles (`…Title`), their linked character styles, and runs in their paragraphs. A colour scheme
+  is applied on purpose with `--scheme FILE.toml` after that:
+  - `[text]`: paragraph style (id or name) = `RRGGBB` or `auto` — set as the style's colour;
+    the black-heading step skips these styles, so passes converge;
+  - `[table] header_fill`: first rows and `tblHeader` rows, cell shading whose fill is not `auto`
+    or `FFFFFF` gets this fill (theme fill attributes removed); unshaded headers stay unshaded.
 - Language: document default `lang` = the run language most characters carried before 11.5, so
   spelling and hyphenation work after per-run languages are removed.
 - Headings: every heading style (outline level 0–8) has `keepNext`, so a heading never stays at
@@ -414,6 +424,13 @@ Per paragraph style, over its paragraphs in all stories:
   `pageBreakBefore` leave a blank page.
 - Empty heading paragraphs at the very end of the body (only empty paragraphs after them, no
   bookmarks) are removed: with `pageBreakBefore` each adds a blank last page.
+
+### 11.9 Captions stay with their pictures and tables
+- A paragraph holding only a picture, followed (after any empty paragraphs) by a caption
+  (`Рисунок N` / `Figure N` / `Таблица N` / `Table N`): `keepNext` on the picture paragraph and on
+  the empty paragraphs between, so the caption never starts the next page alone.
+- A caption followed by a table or picture (caption above): `keepNext` on the caption.
+- Set directly only when the paragraph's style doesn't already keep with next.
 
 **Verify:** text of all stories is unchanged except whitespace (§6); the result opens in Word, and
 a Word-made PDF shows one font family, no stray indents, top-left cells.

@@ -20,7 +20,8 @@ reported, never changed silently.
 | Structure | Runs of 2+ empty paragraphs collapsed to one; empty headings reported |
 | Sanitize | Accept all tracked changes; remove all comments (with their parts); strip author/company metadata; remove macros, OLE embeds, hidden text, proofing marks, protection, `_GoBack` bookmarks; drop unused styles, numbering, relationships and media |
 | Styles | Unstyled paragraphs and headings typed as body text get their styles; captions and block titles get their own styles; dominant direct formatting is promoted into styles and the rest stripped (fonts, sizes, colours, spacing, indents); emphasis is kept |
-| House style | Body justified, 6 pt before/after, auto hyphenation; theme fonts; black text; equal TOC levels; embedded fonts removed |
+| House style | Body justified, 6 pt before/after, auto hyphenation; theme fonts; black text and headings (colours only from a `--scheme`); equal TOC levels; embedded fonts removed |
+| Captions | A picture and its caption, a caption and the table or picture under it, stay on one page |
 | Table cells | 0.1" padding on all sides, text top-left, header rows without their own spacing |
 | TOC | Mark all fields dirty and set `updateFields`, so Word rebuilds the TOC and page numbers on open |
 
@@ -58,6 +59,13 @@ Options:
 - `--only N[,N...]` — run only the rules with these spec section numbers, e.g.
   `--only 8.1,8.2` accepts tracked changes and removes comments without touching
   layout or text. All verification checks still run.
+- `--font NAME` — set the theme heading and body fonts to `NAME`, so the whole
+  document uses it (with rule 11.6). The font is not embedded in the `.docx`; a PDF
+  export embeds it.
+- `--scheme FILE.toml` — colour scheme applied after the house style, which makes
+  headings black (with rule 11.6): text colours of styles and the fill of shaded table
+  header rows. Keep a document's scheme next to the document; see
+  [`schemes/example.toml`](schemes/example.toml) for the format.
 
 Each run also writes `<output>.report.md` (or `<input>_check.report.md` for
 `check`). It contains:
@@ -72,6 +80,21 @@ Each run also writes `<output>.report.md` (or `<input>_check.report.md` for
 2. Decide the lead-ins under review; accept the right ones with `--leadin ID`.
 3. `fix` the document.
 4. Open the result in Word once so the TOC and page numbers refresh, then save.
+
+### Naming convention
+
+Working files and release files are kept apart:
+
+- **Working files** stay next to the source document. A new iteration gets the
+  next `_v#` at the end of the name: `Report_v1.docx`, `Report_v2.docx`, … Earlier
+  versions are never overwritten.
+- **Release files** go to a `release/` folder and are named
+  `<name>_<version>_rc#.docx`. Here `<version>` is the public version number and
+  `#` is the release-candidate iteration: `release/Report_1.0_rc1.docx`,
+  `release/Report_1.0_rc2.docx`, … Release files are not edited; each fix
+  produces the next `rc#`.
+- A document's colour scheme (`--scheme`) is kept next to the source document as
+  `<name>.scheme.toml`.
 
 ## Rendering with Microsoft Word (macOS)
 
