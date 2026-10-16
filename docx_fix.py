@@ -1664,6 +1664,21 @@ def rule_house_style(d):
             if sp.get(q('w:before')) != TOC1_BEFORE:
                 sp.set(q('w:before'), TOC1_BEFORE)
                 n += 1
+    # the page-number tab of every TOC level sits at the right margin
+    width = text_width(d)
+    if width:
+        for sid in tocs:
+            for tab in st.by_id[sid].iter(q('w:tab')):
+                if wv(tab) == 'right' and tab.get(q('w:pos')) != width:
+                    tab.set(q('w:pos'), width)
+                    n += 1
+        for story in d.stories:
+            for p in story.iter(P):
+                if p_style(p, st) in tocs:
+                    for tab in p.findall('w:pPr/w:tabs/w:tab', NS):
+                        if wv(tab) == 'right' and tab.get(q('w:pos')) != width:
+                            tab.set(q('w:pos'), width)
+                            n += 1
     n += toc_levels(d)
     # document defaults: theme body font, black, the language most of the text is in
     defaults = root.find('w:docDefaults/w:rPrDefault/w:rPr', NS)
@@ -1737,6 +1752,17 @@ def apply_scheme(d, st, text):
 
 
 TOC1_BEFORE = '360'  # 18 pt
+
+
+def text_width(d):
+    """Text width in twips of the body's last section: page width less both margins and gutter."""
+    sp = d.xml(d.main).find('w:body/w:sectPr', NS)
+    sz = sp.find(q('w:pgSz')) if sp is not None else None
+    mar = sp.find(q('w:pgMar')) if sp is not None else None
+    if sz is None or mar is None:
+        return None
+    w = int(wv(sz, 'w')) - sum(int(mar.get(q('w:' + k)) or 0) for k in ('left', 'right', 'gutter'))
+    return str(w)
 
 
 def toc_levels(d):
