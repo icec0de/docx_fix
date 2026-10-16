@@ -86,13 +86,13 @@ Each run also writes `<output>.report.md` (or `<input>_check.report.md` for
 Working files and release files are kept apart:
 
 - **Working files** stay next to the source document. A new iteration gets the
-  next `_v#` at the end of the name: `Report_v1.docx`, `Report_v2.docx`, … Earlier
-  versions are never overwritten.
+  next `_v##` (two digits) at the end of the name: `Report_v01.docx`,
+  `Report_v02.docx`, … Earlier versions are never overwritten.
 - **Release files** go to a `release/` folder and are named
-  `<name>_<version>_rc#.docx`. Here `<version>` is the public version number and
-  `#` is the release-candidate iteration: `release/Report_1.0_rc1.docx`,
-  `release/Report_1.0_rc2.docx`, … Release files are not edited; each fix
-  produces the next `rc#`.
+  `<name>_<version>_rc##.docx`. Here `<version>` is the public version number and
+  `##` is the release-candidate iteration as two digits, so the files sort
+  correctly past 9: `release/Report_1.0_rc01.docx`, `release/Report_1.0_rc02.docx`,
+  … Release files are not edited; each fix produces the next `rc##`.
 - A document's colour scheme (`--scheme`) is kept next to the source document as
   `<name>.scheme.toml`.
 
