@@ -22,6 +22,7 @@ Options:
     --only N[,N...]        run only the rules with these spec numbers (e.g. --only 8.1,8.2 accepts
                            tracked changes and removes comments, leaving layout and text alone)
     --font NAME            set the theme heading and body fonts to NAME (with rule 11.6)
+    --toc-levels N         the TOC lists heading levels 1-N (with rule 11.6)
     --scheme FILE.toml     colour scheme applied after the house style (rule 11.6): [text] style
                            (id or name) = RRGGBB|auto; [table] header_fill = RRGGBB
 
@@ -1651,6 +1652,12 @@ def rule_house_style(d):
                         remove(x)
                     insert_ordered(rpr, mk('w:' + tag, {'val': size}), RPR_ORDER)
                 n += 1
+    # TOC levels carry no indent: the section numbers already show the nesting
+    for sid in tocs:
+        for ind in list(st.by_id[sid].iter(q('w:ind'))):
+            remove(ind)
+            n += 1
+    n += toc_levels(d)
     # document defaults: theme body font, black, the language most of the text is in
     defaults = root.find('w:docDefaults/w:rPrDefault/w:rPr', NS)
     if defaults is not None:
@@ -1719,6 +1726,30 @@ def apply_scheme(d, st, text):
                         for k in ('themeFill', 'themeFillTint', 'themeFillShade'):
                             shd.attrib.pop(q('w:' + k), None)
                         n += 1
+    return n
+
+
+def toc_levels(d):
+    """--toc-levels N: the TOC field lists heading levels 1–N (`\\o "1-N"`). Word drops the deeper
+    entries when it updates the TOC."""
+    if not d.opts.toc_levels:
+        return 0
+    n = 0
+    for root in d.stories:
+        for el in root.iter(q('w:instrText')):
+            text = el.text or ''
+            if re.match(r'\s*TOC\b', text):
+                new = re.sub(r'\\o\s+"1-\d"', f'\\\\o "1-{d.opts.toc_levels}"', text)
+                if new != text:
+                    el.text = new
+                    n += 1
+        for el in root.iter(q('w:fldSimple')):
+            text = el.get(q('w:instr')) or ''
+            if re.match(r'\s*TOC\b', text):
+                new = re.sub(r'\\o\s+"1-\d"', f'\\\\o "1-{d.opts.toc_levels}"', text)
+                if new != text:
+                    el.set(q('w:instr'), new)
+                    n += 1
     return n
 
 
@@ -2073,6 +2104,7 @@ def parse_args(argv):
     ap.add_argument('--only', action='append', default=[])
     ap.add_argument('--font')
     ap.add_argument('--scheme', dest='scheme_file')
+    ap.add_argument('--toc-levels', type=int, choices=range(1, 10))
     try:
         args = ap.parse_args(argv)
         args.heading_styles = {k: int(v) for k, v in (x.split('=') for x in args.heading_style)}

@@ -407,6 +407,10 @@ Per paragraph style, over its paragraphs in all stories:
   the bottom of a page without its text; level-1 heading styles have `pageBreakBefore`, so each
   level-1 heading starts a new page.
 - TOC levels (`toc N` styles) share one size: the most common size among the levels that set one.
+- TOC levels carry no indent: remove `w:ind` from the `toc N` styles; section numbers show the
+  nesting.
+- `--toc-levels N`: in every `TOC` field instruction `\o "1-K"` becomes `\o "1-N"`; Word drops the
+  deeper entries when it updates the TOC (§9, or the Word render).
 - `settings.xml`: `autoHyphenation`, `doNotHyphenateCaps`; remove `embedTrueTypeFonts`,
   `embedSystemFonts`, `saveSubsetFonts` and `proofState` (a stored "clean" makes Word skip
   checking changed text). Delete embedded font parts and font-table entries nothing refers to.
